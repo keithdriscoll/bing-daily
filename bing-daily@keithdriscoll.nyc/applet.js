@@ -216,7 +216,7 @@ class BingWallpaperApplet extends Applet.IconApplet {
         let aboutItem = new PopupMenu.PopupMenuItem(_("About"));
         aboutItem.connect('activate', () => {
             this._notify(
-                _("Bing Daily v1.0.0\n") +
+                _("Bing Daily v1.1.0\n") +
                 _("By Keith Driscoll\n") +
                 _("Sets your desktop to the Bing Image of the Day.\n") +
                 _("Works on Cinnamon 5.x and 6.x.")
