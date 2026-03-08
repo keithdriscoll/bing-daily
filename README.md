@@ -23,6 +23,7 @@ The key difference from every other Bing wallpaper tool: **it never contacts Mic
 ![Applet in panel](screenshots/applets.png)
 ![Features menu](screenshots/features.png)
 ![Settings panel](screenshots/settings.png)
+![Bing Daily wallpaper](screenshots/wallpaper.png)
 
 ---
 
