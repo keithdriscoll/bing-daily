@@ -83,20 +83,25 @@ class BingWallpaperApplet extends Applet.IconApplet {
             this._handleRefreshResult(exitCode, stdout, stderr, /*silent=*/true);
         });
 
-        // Re-refresh silently when network becomes available (e.g. waking at a café)
+        // Re-refresh silently on any network connect event (including reconnecting to the same network)
         this._networkMonitor = Gio.NetworkMonitor.get_default();
-        this._networkAvailable = this._networkMonitor.get_network_available();
+        this._networkRefreshTimeout = null;
         this._networkChangedId = this._networkMonitor.connect('network-changed', (monitor, available) => {
-            if (available && !this._networkAvailable) {
+            if (available) {
+                // Debounce: cancel any pending refresh so rapid signals don't stack up
+                if (this._networkRefreshTimeout) {
+                    GLib.source_remove(this._networkRefreshTimeout);
+                    this._networkRefreshTimeout = null;
+                }
                 // Wait 5s for connection to stabilize before refreshing
-                GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
+                this._networkRefreshTimeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
+                    this._networkRefreshTimeout = null;
                     this._runEngine(['refresh'], (exitCode, stdout, stderr) => {
                         this._handleRefreshResult(exitCode, stdout, stderr, /*silent=*/true);
                     });
                     return GLib.SOURCE_REMOVE;
                 });
             }
-            this._networkAvailable = available;
         });
     }
 
@@ -216,7 +221,7 @@ class BingWallpaperApplet extends Applet.IconApplet {
         let aboutItem = new PopupMenu.PopupMenuItem(_("About"));
         aboutItem.connect('activate', () => {
             this._notify(
-                _("Bing Daily v1.0.0\n") +
+                _("Bing Daily v1.0.1\n") +
                 _("By Keith Driscoll\n") +
                 _("Sets your desktop to the Bing Image of the Day.\n") +
                 _("Works on Cinnamon 5.x and 6.x.")
@@ -387,6 +392,10 @@ class BingWallpaperApplet extends Applet.IconApplet {
 
     on_applet_removed_from_panel() {
         GLib.spawn_command_line_async('systemctl --user disable --now bing-daily.timer');
+        if (this._networkRefreshTimeout) {
+            GLib.source_remove(this._networkRefreshTimeout);
+            this._networkRefreshTimeout = null;
+        }
         if (this._networkChangedId) {
             this._networkMonitor.disconnect(this._networkChangedId);
             this._networkChangedId = null;
