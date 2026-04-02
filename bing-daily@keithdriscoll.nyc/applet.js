@@ -16,10 +16,18 @@ const Main = imports.ui.main;
 const PopupMenu = imports.ui.popupMenu;
 const Settings = imports.ui.settings;
 const Util = imports.misc.util;
+const Gettext = imports.gettext;
 
 // Cinnamon version (informational — no Soup-related branching needed)
 const CINNAMON_VERSION = imports.misc.config.PACKAGE_VERSION;
 const CINNAMON_MAJOR = parseInt(CINNAMON_VERSION.split('.')[0]);
+
+// Translations
+const UUID = "bing-daily@keithdriscoll.nyc";
+Gettext.bindtextdomain(UUID, GLib.get_user_data_dir() + "/locale");
+function _(text) {
+    return Gettext.dgettext(UUID, text);
+}
 
 // ---------------------------------------------------------------------------
 // Applet class
@@ -187,8 +195,8 @@ class BingWallpaperApplet extends Applet.IconApplet {
                     let parts = stdout.split(':');
                     let dl = parseInt(parts[1]) || 0;
                     let failed = parseInt(parts[2]) || 0;
-                    let msg = dl + _(" image(s) downloaded");
-                    if (failed > 0) msg += ", " + failed + _(" failed");
+                    let msg = _("%d image(s) downloaded").format(dl);
+                    if (failed > 0) msg += _(", %d failed").format(failed);
                     this._notify(msg);
                 }
             });
@@ -221,10 +229,7 @@ class BingWallpaperApplet extends Applet.IconApplet {
         let aboutItem = new PopupMenu.PopupMenuItem(_("About"));
         aboutItem.connect('activate', () => {
             this._notify(
-                _("Bing Daily v1.0.1\n") +
-                _("By Keith Driscoll\n") +
-                _("Sets your desktop to the Bing Image of the Day.\n") +
-                _("Works on Cinnamon 5.x and 6.x.")
+                _("Bing Daily v1.0.1\nBy Keith Driscoll\nSets your desktop to the Bing Image of the Day.\nWorks on Cinnamon 5.x and 6.x.")
             );
         });
         this.menu.addMenuItem(aboutItem);
@@ -328,15 +333,21 @@ class BingWallpaperApplet extends Applet.IconApplet {
             history_limit: this.history_limit || 30,
             frequency: this.frequency || 'daily'
         };
-        let configDir = GLib.get_home_dir() + '/.config/bing-daily';
+        let configDir = GLib.get_user_config_dir() + '/bing-daily';
         GLib.mkdir_with_parents(configDir, 0o755);
         let configPath = configDir + '/config.json';
         let file = Gio.File.new_for_path(configPath);
         let bytes = GLib.Bytes.new(JSON.stringify(config, null, 2));
-        file.replace_contents(bytes.get_data(), null, false,
-            Gio.FileCreateFlags.REPLACE_DESTINATION, null);
-        // Restrict config file to owner r/w only.
-        file.set_attribute_uint32('unix::mode', 0o600, Gio.FileQueryInfoFlags.NONE, null);
+        file.replace_contents_async(bytes.get_data(), null, false,
+            Gio.FileCreateFlags.REPLACE_DESTINATION, null, (f, res) => {
+                try {
+                    f.replace_contents_finish(res);
+                    f.set_attribute_uint32('unix::mode', 0o600,
+                        Gio.FileQueryInfoFlags.NONE, null);
+                } catch (e) {
+                    global.logError('BingWallpaper: failed to write config: ' + e);
+                }
+            });
 
         // Compute time string from update_time (seconds since midnight)
         let hours = Math.floor(this.update_time / 3600).toString().padStart(2, '0');
@@ -355,19 +366,24 @@ class BingWallpaperApplet extends Applet.IconApplet {
 
         // Write the systemd timer file dynamically
         let timerContent = '[Unit]\nDescription=Bing Daily Wallpaper Refresh Timer\n\n[Timer]\nOnCalendar=' + onCalendar + '\nPersistent=true\nUnit=bing-daily.service\n\n[Install]\nWantedBy=timers.target\n';
-        let timerPath = GLib.get_home_dir() + '/.config/systemd/user/bing-daily.timer';
+        let timerPath = GLib.get_user_config_dir() + '/systemd/user/bing-daily.timer';
         let timerFile = Gio.File.new_for_path(timerPath);
         let timerBytes = GLib.Bytes.new(timerContent);
-        timerFile.replace_contents(timerBytes.get_data(), null, false,
-            Gio.FileCreateFlags.REPLACE_DESTINATION, null);
-
-        // Reload systemd timer
-        GLib.spawn_command_line_async('systemctl --user daemon-reload');
-        if (this.auto_update) {
-            GLib.spawn_command_line_async('systemctl --user enable --now bing-daily.timer');
-        } else {
-            GLib.spawn_command_line_async('systemctl --user disable --now bing-daily.timer');
-        }
+        timerFile.replace_contents_async(timerBytes.get_data(), null, false,
+            Gio.FileCreateFlags.REPLACE_DESTINATION, null, (f, res) => {
+                try {
+                    f.replace_contents_finish(res);
+                } catch (e) {
+                    global.logError('BingWallpaper: failed to write timer: ' + e);
+                }
+                // Reload systemd timer after file is written
+                Util.spawn(['systemctl', '--user', 'daemon-reload']);
+                if (this.auto_update) {
+                    Util.spawn(['systemctl', '--user', 'enable', '--now', 'bing-daily.timer']);
+                } else {
+                    Util.spawn(['systemctl', '--user', 'disable', '--now', 'bing-daily.timer']);
+                }
+            });
     }
 
     // -----------------------------------------------------------------------
@@ -391,7 +407,7 @@ class BingWallpaperApplet extends Applet.IconApplet {
     // -----------------------------------------------------------------------
 
     on_applet_removed_from_panel() {
-        GLib.spawn_command_line_async('systemctl --user disable --now bing-daily.timer');
+        Util.spawn(['systemctl', '--user', 'disable', '--now', 'bing-daily.timer']);
         if (this._networkRefreshTimeout) {
             GLib.source_remove(this._networkRefreshTimeout);
             this._networkRefreshTimeout = null;
@@ -403,6 +419,17 @@ class BingWallpaperApplet extends Applet.IconApplet {
         if (this.settings) {
             this.settings.finalize();
         }
+
+        // Clean up systemd unit files left on disk
+        let systemdDir = GLib.get_user_config_dir() + '/systemd/user/';
+        for (let name of ['bing-daily.service', 'bing-daily.timer']) {
+            try {
+                Gio.File.new_for_path(systemdDir + name).delete(null);
+            } catch (e) {
+                // File may not exist — not an error
+            }
+        }
+        Util.spawn(['systemctl', '--user', 'daemon-reload']);
     }
 }
 
