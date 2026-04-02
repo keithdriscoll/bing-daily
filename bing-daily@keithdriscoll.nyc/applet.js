@@ -41,6 +41,12 @@ class BingWallpaperApplet extends Applet.IconApplet {
         this.metadata = metadata;
         this._enginePath = metadata.path + '/engine/bing_engine.py';
 
+        // If user browses prev/next, suppress auto-refresh until the next day
+        this._overrideDate = null;
+        // Region change tracking for auto-refresh
+        this._lastRegion = null;
+        this._regionChangeTimeout = null;
+
         // Panel icon — symbolic SVG follows panel text colour on supporting themes
         try {
             this.set_applet_icon_path(metadata.path + '/icons/bing-daily-symbolic.svg');
@@ -80,6 +86,10 @@ class BingWallpaperApplet extends Applet.IconApplet {
             this._onSettingsChanged.bind(this), null
         );
 
+        // Capture initial region so the first _onSettingsChanged callbacks
+        // during binding setup don't look like a region change
+        this._lastRegion = this.region;
+
         // Build menu
         this.menuManager = new PopupMenu.PopupMenuManager(this);
         this.menu = new Applet.AppletPopupMenu(this, orientation);
@@ -96,6 +106,10 @@ class BingWallpaperApplet extends Applet.IconApplet {
         this._networkRefreshTimeout = null;
         this._networkChangedId = this._networkMonitor.connect('network-changed', (monitor, available) => {
             if (available) {
+                // Don't auto-revert if user manually browsed to a different image today
+                if (this._overrideDate === new Date().toDateString()) {
+                    return;
+                }
                 // Debounce: cancel any pending refresh so rapid signals don't stack up
                 if (this._networkRefreshTimeout) {
                     GLib.source_remove(this._networkRefreshTimeout);
@@ -123,6 +137,7 @@ class BingWallpaperApplet extends Applet.IconApplet {
         // Refresh Now
         let refreshItem = new PopupMenu.PopupMenuItem(_("Refresh Now"));
         refreshItem.connect('activate', () => {
+            this._overrideDate = null; // user explicitly wants today's image
             this._runEngine(['refresh'], (exitCode, stdout, stderr) => {
                 this._handleRefreshResult(exitCode, stdout, stderr, /*silent=*/false);
             });
@@ -134,6 +149,7 @@ class BingWallpaperApplet extends Applet.IconApplet {
         // Previous Image (older)
         let prevItem = new PopupMenu.PopupMenuItem(_("\u25C0 Previous Image"));
         prevItem.connect('activate', () => {
+            this._overrideDate = new Date().toDateString(); // suppress auto-refresh until tomorrow
             this._runEngine(['prev'], (exitCode, stdout, stderr) => {
                 this._handleNavResult(exitCode, stdout, stderr);
             });
@@ -143,6 +159,7 @@ class BingWallpaperApplet extends Applet.IconApplet {
         // Next Image (newer)
         let nextItem = new PopupMenu.PopupMenuItem(_("\u25B6 Next Image"));
         nextItem.connect('activate', () => {
+            this._overrideDate = new Date().toDateString(); // suppress auto-refresh until tomorrow
             this._runEngine(['next'], (exitCode, stdout, stderr) => {
                 this._handleNavResult(exitCode, stdout, stderr);
             });
@@ -229,7 +246,7 @@ class BingWallpaperApplet extends Applet.IconApplet {
         let aboutItem = new PopupMenu.PopupMenuItem(_("About"));
         aboutItem.connect('activate', () => {
             this._notify(
-                _("Bing Daily v1.0.1\nBy Keith Driscoll\nSets your desktop to the Bing Image of the Day.\nWorks on Cinnamon 5.x and 6.x.")
+                _("Bing Daily v1.0.2\nBy Keith Driscoll\nSets your desktop to the Bing Image of the Day.\nWorks on Cinnamon 5.x and 6.x.")
             );
         });
         this.menu.addMenuItem(aboutItem);
@@ -328,6 +345,11 @@ class BingWallpaperApplet extends Applet.IconApplet {
     // -----------------------------------------------------------------------
 
     _onSettingsChanged() {
+        // Detect region change — trigger auto-refresh after a short delay so the
+        // async config write completes before the engine reads it
+        let regionChanged = this._lastRegion !== null && this.region !== this._lastRegion;
+        this._lastRegion = this.region;
+
         let config = {
             region: (this.region !== undefined && this.region !== null) ? this.region : 'us',
             history_limit: this.history_limit || 30,
@@ -384,6 +406,23 @@ class BingWallpaperApplet extends Applet.IconApplet {
                     Util.spawn(['systemctl', '--user', 'disable', '--now', 'bing-daily.timer']);
                 }
             });
+
+        if (regionChanged) {
+            // Clear any manual override — user wants fresh content for the new region
+            this._overrideDate = null;
+            // Cancel any prior pending region-change refresh
+            if (this._regionChangeTimeout) {
+                GLib.source_remove(this._regionChangeTimeout);
+            }
+            // Wait 5s so the async config write is guaranteed to complete first
+            this._regionChangeTimeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
+                this._regionChangeTimeout = null;
+                this._runEngine(['refresh'], (exitCode, stdout, stderr) => {
+                    this._handleRefreshResult(exitCode, stdout, stderr, /*silent=*/false);
+                });
+                return GLib.SOURCE_REMOVE;
+            });
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -411,6 +450,10 @@ class BingWallpaperApplet extends Applet.IconApplet {
         if (this._networkRefreshTimeout) {
             GLib.source_remove(this._networkRefreshTimeout);
             this._networkRefreshTimeout = null;
+        }
+        if (this._regionChangeTimeout) {
+            GLib.source_remove(this._regionChangeTimeout);
+            this._regionChangeTimeout = null;
         }
         if (this._networkChangedId) {
             this._networkMonitor.disconnect(this._networkChangedId);
